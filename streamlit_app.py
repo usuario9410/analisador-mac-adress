@@ -1,5 +1,5 @@
 # -------------------------------------------------------------
-# Streamlit app — Análise de Dispositivos BLE/Wi‑Fi (versão 4.5)
+# Streamlit app — Análise de Dispositivos BLE/Wi‑Fi (versão 4.6)
 # -------------------------------------------------------------
 # Requisitos:
 #   streamlit pandas matplotlib openpyxl numpy requests
@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import textwrap
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -39,15 +38,18 @@ EXPECTED_COLS = {
     "timestamp": ["timestamp", "time", "date"],
     "mac": ["mac", "mac_address", "address"],
     "rssi": ["rssi", "signal", "power"],
-    # ⬇️ permitimos vários nomes para a coluna onde aparece o modelo/fabricante
+    # → coluna com nome/amigável do dispositivo
     "device_name": [
         "name",
         "device",
         "device_name",
+        "model",
         "manufacturer",
         "company",
         "vendor",
     ],
+    # se o arquivo já trouxer a coluna do tipo não vamos sobrescrever
+    "device_type": ["device_type", "type", "category"],
 }
 
 DEVICE_TYPES = [
@@ -73,9 +75,7 @@ VENDOR_KEYWORDS = {
     "sony": "Sony",
 }
 
-# 📦 Embedding dos prefixos OUI mais comuns
-#   → evita depender de arquivos externos ou internet
-#   → pode ser estendido conforme novas marcas apareçam
+# Pequeno dicionário OUI embutido (pode ser expandido)
 EMBEDDED_OUI = {
     # Apple
     "dc44d6": "Apple",
@@ -103,10 +103,7 @@ EMBEDDED_OUI = {
     "7c4986": "OnePlus",
 }
 
-# Pequeno dicionário de fallback caso não tenhamos o CSV nem acesso à internet
-MINIMAL_OUI = EMBEDDED_OUI.copy()
-
-OUI_URL = "https://standards-oui.ieee.org/oui/oui.csv"  # ~16 MB; atualizado constantemente
+OUI_URL = "https://standards-oui.ieee.org/oui/oui.csv"  # atualizado regularmente (~16 MB)
 
 # ──────────────────────────────────────────────────────────────
 # 🔍 OUI — carrega local → remoto → usa EMBEDDED
@@ -114,37 +111,35 @@ OUI_URL = "https://standards-oui.ieee.org/oui/oui.csv"  # ~16 MB; atualizado co
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
 def _load_oui(path: str | Path | None) -> dict[str, str]:
-    """Retorna dicionário {prefixo_sem_separador: marca}.
-    Começamos com os EMBEDDED e vamos enriquecendo se possível.
-    """
+    """Retorna dicionário {prefixo_sem_separador: marca}."""
 
     mapping: dict[str, str] = EMBEDDED_OUI.copy()
 
-    # 1) local oui.csv salvo junto ao app (preferencial — evita download)
+    # 1) arquivo local (ideal para uso offline)
     if path and Path(path).exists():
         try:
             oui_df = pd.read_csv(path)
             mapping.update({
-                row["assignment"].replace("-", "").lower(): row["organization_name"].split(" (")[0]
+                row["assignment"].replace("-", "").lower(): row["organization_name"].split(" (", 1)[0]
                 for _, row in oui_df.iterrows()
             })
             return mapping
         except Exception as exc:
             st.warning(f"Falha ao ler oui.csv local: {exc}")
 
-    # 2) remoto (pode falhar na Streamlit Cloud dependendo de proxy)
+    # 2) remoto (pode não funcionar em ambientes restritos)
     try:
         r = requests.get(OUI_URL, timeout=10)
         r.raise_for_status()
         df_remote = pd.read_csv(io.StringIO(r.text))
         mapping.update({
-            row["Assignment"].replace("-", "").lower(): row["Organization Name"].split(" (")[0]
+            row["Assignment"].replace("-", "").lower(): row["Organization Name"].split(" (", 1)[0]
             for _, row in df_remote.iterrows()
         })
-        return mapping
     except Exception:
         st.info("Sem acesso à lista OUI remota — usando somente os prefixos embutidos")
-        return mapping
+
+    return mapping
 
 
 OUI_LOOKUP: dict[str, str] = _load_oui("oui.csv")
@@ -164,7 +159,7 @@ def _normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
                 rename_map[variant.lower()] = std
                 break
     df = df.rename(columns=rename_map)
-    # adiciona colunas faltantes
+    # adiciona colunas faltantes (mas *não* sobrescreve device_type se já existir)
     for col in EXPECTED_COLS:
         if col not in df.columns:
             df[col] = np.nan
@@ -172,7 +167,7 @@ def _normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _lookup_brand(mac: str, dev_name: str) -> str:
-    """Retorna a marca (Apple, Samsung, etc.) ou Unknown."""
+    """Retorna a marca ou Unknown."""
     prefix = mac[:6].lower()
     brand = OUI_LOOKUP.get(prefix)
     if brand:
@@ -187,22 +182,22 @@ def _lookup_brand(mac: str, dev_name: str) -> str:
 def _infer_type(name: str, brand: str) -> str:
     n = str(name).lower()
     b = str(brand).lower()
-    # — earphones —
+    # earphones
     if any(k in n for k in ("bud", "pods", "ear", "head", "fone")):
         return "Fones"
-    # — watches / bands —
+    # watches
     if any(k in n for k in ("watch", "gear", "fit", "band", "relog")):
         return "Relógio"
-    # — tablets —
+    # tablets
     if any(k in n for k in ("ipad", "tablet")) or "tablet" in b:
         return "Tablet"
-    # — computers —
+    # computers
     if any(k in n for k in ("macbook", "pc", "laptop", "notebook", "desktop")) or "comput" in b:
         return "Computador"
-    # — sensors / tags —
+    # sensors / tags
     if any(k in n for k in ("tag", "tile", "sensor", "beacon")):
         return "Sensor"
-    # — smartphones (apple / samsung / etc.) —
+    # smartphones
     if b in (v.lower() for v in VENDOR_KEYWORDS.values()):
         return "Smartphone"
     return "Desconhecido"
@@ -217,7 +212,7 @@ def _stable_id(row):
 # 📂 Upload
 # ──────────────────────────────────────────────────────────────
 
-st.title("📊 Análise de Dispositivos BLE/Wi‑Fi (v4.5 — OUI embutido)")
+st.title("📊 Análise de Dispositivos BLE/Wi‑Fi (v4.6 — OUI embutido)")
 
 uploaded = st.file_uploader(
     "Arraste ou selecione uma planilha (XLSX/CSV)",
@@ -256,16 +251,33 @@ df["mac_clean"] = (
     df["mac"].astype(str).str.upper().str.replace(r"[^0-9A-F]", "", regex=True)
 )
 
-# Marca e tipo
+# ── Marca ────────────────────────────────────────────────────
 
-df["brand"] = df.apply(
+if "brand" not in df.columns:
+    df["brand"] = np.nan
+
+mask_brand_na = df["brand"].isna() | (df["brand"].str.strip() == "")
+
+df.loc[mask_brand_na, "brand"] = df.loc[mask_brand_na].apply(
     lambda r: _lookup_brand(str(r["mac_clean"]), str(r.get("device_name", ""))),
     axis=1,
 )
 
-df["device_type"] = df.apply(
+# ── Tipo ─────────────────────────────────────────────────────
+
+if "device_type" not in df.columns:
+    df["device_type"] = np.nan
+
+mask_type_na = df["device_type"].isna() | (df["device_type"].str.strip() == "")
+
+df.loc[mask_type_na, "device_type"] = df.loc[mask_type_na].apply(
     lambda r: _infer_type(str(r.get("device_name", "")), str(r["brand"])), axis=1
 )
+
+# força categoria conhecida
+if not set(df["device_type"].unique()) <= set(DEVICE_TYPES):
+    unk_mask = ~df["device_type"].isin(DEVICE_TYPES)
+    df.loc[unk_mask, "device_type"] = "Desconhecido"
 
 # ──────────────────────────────────────────────────────────────
 # 📈 Gráficos
