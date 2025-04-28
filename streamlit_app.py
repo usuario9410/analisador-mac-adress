@@ -1,5 +1,5 @@
 # -------------------------------------------------------------
-# Streamlit app — Análise de Dispositivos BLE/Wi‑Fi (versão 4.6)
+# Streamlit app — Análise de Dispositivos BLE/Wi‑Fi (versão 4.7)
 # -------------------------------------------------------------
 # Requisitos:
 #   streamlit pandas matplotlib openpyxl numpy requests
@@ -208,11 +208,15 @@ def _stable_id(row):
     return hashlib.md5(key.encode()).hexdigest()[:10]
 
 
+def _is_na_series(s: pd.Series) -> pd.Series:
+    """True para valores vazios após conversão para string (resolve .str AttributeError)."""
+    return s.isna() | s.astype(str).str.strip().isin(["", "nan", "None", "NaN"])
+
 # ──────────────────────────────────────────────────────────────
 # 📂 Upload
 # ──────────────────────────────────────────────────────────────
 
-st.title("📊 Análise de Dispositivos BLE/Wi‑Fi (v4.6 — OUI embutido)")
+st.title("📊 Análise de Dispositivos BLE/Wi‑Fi (v4.7 — OUI embutido)")
 
 uploaded = st.file_uploader(
     "Arraste ou selecione uma planilha (XLSX/CSV)",
@@ -256,23 +260,25 @@ df["mac_clean"] = (
 if "brand" not in df.columns:
     df["brand"] = np.nan
 
-mask_brand_na = df["brand"].isna() | (df["brand"].str.strip() == "")
+mask_brand_na = _is_na_series(df["brand"])
 
-df.loc[mask_brand_na, "brand"] = df.loc[mask_brand_na].apply(
-    lambda r: _lookup_brand(str(r["mac_clean"]), str(r.get("device_name", ""))),
-    axis=1,
-)
+if mask_brand_na.any():
+    df.loc[mask_brand_na, "brand"] = df.loc[mask_brand_na].apply(
+        lambda r: _lookup_brand(str(r["mac_clean"]), str(r.get("device_name", ""))),
+        axis=1,
+    )
 
 # ── Tipo ─────────────────────────────────────────────────────
 
 if "device_type" not in df.columns:
     df["device_type"] = np.nan
 
-mask_type_na = df["device_type"].isna() | (df["device_type"].str.strip() == "")
+mask_type_na = _is_na_series(df["device_type"])
 
-df.loc[mask_type_na, "device_type"] = df.loc[mask_type_na].apply(
-    lambda r: _infer_type(str(r.get("device_name", "")), str(r["brand"])), axis=1
-)
+if mask_type_na.any():
+    df.loc[mask_type_na, "device_type"] = df.loc[mask_type_na].apply(
+        lambda r: _infer_type(str(r.get("device_name", "")), str(r["brand"])), axis=1
+    )
 
 # força categoria conhecida
 if not set(df["device_type"].unique()) <= set(DEVICE_TYPES):
