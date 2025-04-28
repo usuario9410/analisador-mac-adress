@@ -1,5 +1,5 @@
 # -------------------------------------------------------------
-# Streamlit app — Análise de Dispositivos BLE/Wi‑Fi (versão 4.4)
+# Streamlit app — Análise de Dispositivos BLE/Wi‑Fi (versão 4.5)
 # -------------------------------------------------------------
 # Requisitos:
 #   streamlit pandas matplotlib openpyxl numpy requests
@@ -73,59 +73,78 @@ VENDOR_KEYWORDS = {
     "sony": "Sony",
 }
 
-# Pequeno dicionário de fallback caso não tenhamos o CSV nem acesso à internet
-MINIMAL_OUI = {
+# 📦 Embedding dos prefixos OUI mais comuns
+#   → evita depender de arquivos externos ou internet
+#   → pode ser estendido conforme novas marcas apareçam
+EMBEDDED_OUI = {
     # Apple
-    "DC44D6": "Apple",
-    "F0D1A9": "Apple",
-    "BC92B6": "Apple",
+    "dc44d6": "Apple",
+    "f0d1a9": "Apple",
+    "bc92b6": "Apple",
+    "68b6fc": "Apple",
     # Samsung
-    "CC07AB": "Samsung",
-    "10D1DC": "Samsung",
+    "cc07ab": "Samsung",
+    "10d1dc": "Samsung",
+    "2c4d54": "Samsung",
+    "04e8b0": "Samsung",
     # Xiaomi
-    "C894D2": "Xiaomi",
+    "c894d2": "Xiaomi",
+    "54ef44": "Xiaomi",
     # Huawei
-    "50E59C": "Huawei",
+    "50e59c": "Huawei",
+    "84a8e4": "Huawei",
     # Motorola / Lenovo
-    "00486A": "Motorola",
-    "5CD998": "Lenovo",
+    "00486a": "Motorola",
+    "5cd998": "Lenovo",
+    # Amazon
+    "a4ee57": "Amazon",
+    # Realme / Oppo / OnePlus (BBK)
+    "28e02c": "Realme",
+    "7c4986": "OnePlus",
 }
+
+# Pequeno dicionário de fallback caso não tenhamos o CSV nem acesso à internet
+MINIMAL_OUI = EMBEDDED_OUI.copy()
 
 OUI_URL = "https://standards-oui.ieee.org/oui/oui.csv"  # ~16 MB; atualizado constantemente
 
 # ──────────────────────────────────────────────────────────────
-# 🔍 OUI — carrega local → tenta remoto → fallback minimal
+# 🔍 OUI — carrega local → remoto → usa EMBEDDED
 # ──────────────────────────────────────────────────────────────
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
 def _load_oui(path: str | Path | None) -> dict[str, str]:
-    """Retorna dicionário {prefixo_sem_separador: marca}."""
-    # 1) local
+    """Retorna dicionário {prefixo_sem_separador: marca}.
+    Começamos com os EMBEDDED e vamos enriquecendo se possível.
+    """
+
+    mapping: dict[str, str] = EMBEDDED_OUI.copy()
+
+    # 1) local oui.csv salvo junto ao app (preferencial — evita download)
     if path and Path(path).exists():
         try:
             oui_df = pd.read_csv(path)
-            return {
+            mapping.update({
                 row["assignment"].replace("-", "").lower(): row["organization_name"].split(" (")[0]
                 for _, row in oui_df.iterrows()
-            }
+            })
+            return mapping
         except Exception as exc:
             st.warning(f"Falha ao ler oui.csv local: {exc}")
 
-    # 2) remoto
+    # 2) remoto (pode falhar na Streamlit Cloud dependendo de proxy)
     try:
         r = requests.get(OUI_URL, timeout=10)
         r.raise_for_status()
         df_remote = pd.read_csv(io.StringIO(r.text))
-        return {
+        mapping.update({
             row["Assignment"].replace("-", "").lower(): row["Organization Name"].split(" (")[0]
             for _, row in df_remote.iterrows()
-        }
+        })
+        return mapping
     except Exception:
-        # conexão bloqueada em Streamlit Cloud? sem crise, devolve minimal
-        pass
-
-    st.info("Usando mapeamento OUI minimal (offline)")
-    return {k.lower(): v for k, v in MINIMAL_OUI.items()}
+        st.info("Sem acesso à lista OUI remota — usando somente os prefixos embutidos")
+        return mapping
 
 
 OUI_LOOKUP: dict[str, str] = _load_oui("oui.csv")
@@ -198,7 +217,7 @@ def _stable_id(row):
 # 📂 Upload
 # ──────────────────────────────────────────────────────────────
 
-st.title("📊 Análise de Dispositivos BLE/Wi‑Fi (v4.4)")
+st.title("📊 Análise de Dispositivos BLE/Wi‑Fi (v4.5 — OUI embutido)")
 
 uploaded = st.file_uploader(
     "Arraste ou selecione uma planilha (XLSX/CSV)",
@@ -299,7 +318,7 @@ mac_switch_df = mac_switch_df[mac_switch_df["mac_list"].str.len() > 1]
 st.dataframe(mac_switch_df, use_container_width=True)
 
 st.caption(
-    "A heurística usa RSSI arredondado, marca e tipo para agrupar possíveis trocas de MAC. "
+    "A heurística usa RSSI, marca e tipo para agrupar possíveis trocas de MAC. "
     "Ajuste conforme necessidade."
 )
 
