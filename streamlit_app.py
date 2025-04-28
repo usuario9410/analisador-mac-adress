@@ -1,139 +1,161 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
+# -------------------------------------------------------------
+# Streamlit app — Análise de Dispositivos BLE/Wi‑Fi (versão 4)
+# -------------------------------------------------------------
+# Requisitos (pip install …):
+#   streamlit pandas numpy matplotlib scikit-learn (opcional)
+# Arquivos esperados no mesmo diretório:
+#   • oui.csv   → tabela OUI→Marca (3 colunas: prefix,brand,vendor)
+# -------------------------------------------------------------
+
+import hashlib
+import io
 import re
-from io import BytesIO
+from pathlib import Path
 
-st.set_page_config(page_title="BLE/Wi-Fi Device Analytics", layout="wide")
-st.title("📊 BLE / Wi-Fi Device Analytics")
+import numpy as np
+import pandas as pd
+import streamlit as st
+import matplotlib.pyplot as plt
 
-# ── 1 · Uploads ────────────────────────────────────────────────────────────
-up_xls = st.file_uploader("📄 Carregue a planilha (.xlsx)", type=["xlsx"])
-up_oui = st.file_uploader("📑 (Opcional) tabela OUI (.csv)", type=["csv"])
+# ---------- Config. Streamlit ----------
+st.set_page_config(page_title="Análise de Dispositivos Grok", layout="wide")
 
-@st.cache_data(show_spinner=False)
-def load_excel(f): return pd.read_excel(f)
+# ---------- Utilidades ----------
+@st.cache_data
+def load_oui(path: Path) -> dict:
+    """Carrega CSV (prefixo OUI → marca)."""
+    if not path.exists():
+        st.warning("Arquivo oui.csv não encontrado — marcas ficarão vazias.")
+        return {}
+    df_oui = pd.read_csv(path)
+    df_oui["prefix"] = df_oui["prefix"].str.upper()
+    return dict(zip(df_oui["prefix"], df_oui["brand"]))
 
-@st.cache_data(show_spinner=False)
-def load_oui(f):
-    df = pd.read_csv(f, names=["oui","org"])
-    return {row.oui.upper(): row.org.split()[0] for _, row in df.iterrows()}
 
-if up_xls is None:
-    st.info("Envie pelo menos a planilha de resultados para iniciar.")
-    st.stop()
+OUI_MAP = load_oui(Path("oui.csv"))
 
-df      = load_excel(up_xls)
-oui_map = load_oui(up_oui) if up_oui else {}
+# Padrões → tipo de dispositivo
+DEVICE_PATTERNS = [
+    (r"airpod|air[- ]?pods?|pods?$", "Fones"),
+    (r"buds?|galaxy\s?buds?", "Fones"),
+    (r"watch|galaxy\s?watch|i ?watch|(sm-r\d+)", "Relógio"),
+    (r"(mac(book)?|thinkpad|dell|hp|asus|surface)", "Computador"),
+    (r"ipad|tablet", "Tablet"),
+    (r"(tile|tag|smart\s?tag|nut|airtag)", "Tag"),
+    (r"(sensor|ruuvi|switch|door|motion|thermo)", "Sensor"),
+]
 
-# ── 2 · Mapas/heurísticas ─────────────────────────────────────────────────
-COMPANY_ID_MAP = {
-    "4C00": "Apple",    # 0x004C
-    "7500": "Samsung",  # 0x0075
-    "E000": "Google",   # 0x00E0
-    "5701": "Sony",
-    "3101": "LG",
-    "2D01": "Huawei",
-}
 
-def classify_brand(row):
-    name = str(row.get("Company Name", ""))
-    if name:
-        for k in ["Apple","Samsung","Huawei","Xiaomi","OPPO","Realme","Google",
-                  "LG","Sony","Dell","HP","Garmin","Microsoft","Intel"]:
-            if k.lower() in name.lower(): return k
-        return name.split()[0]
-    cid = str(row.get("Company ID", "")).upper()
-    if cid in COMPANY_ID_MAP: return COMPANY_ID_MAP[cid]
-    mac = str(row.get("mac", ""))
-    oui = mac.replace(":","").upper()[:6]
-    return oui_map.get(oui, "Unknown")
+def classify_device(row: pd.Series) -> str:
+    """Retorna o tipo de dispositivo usando heurísticas combinadas."""
+    ln = str(row.get("local_name", "")).lower()
+    mfg = str(row.get("manufacturer_str", "")).lower()
+    uuids = str(row.get("uuids", "")).lower()
+    rssi = row.get("rssi", -127)
+    interval = row.get("interval_ms", 0)
 
-def parse_prod_id(mfg):
-    if not isinstance(mfg, str): return (None, None)
-    m = re.search(r"FF([0-9A-Fa-f]{4})([0-9A-Fa-f]{2})", mfg)
-    return (m.group(1).upper(), int(m.group(2),16)) if m else (None, None)
+    # 1) padrões dedicados
+    for pat, dtype in DEVICE_PATTERNS:
+        if re.search(pat, ln) or re.search(pat, mfg) or re.search(pat, uuids):
+            return dtype
 
-def classify_type(row):
-    _, prod = parse_prod_id(row.get("others",""))
-    brand   = row["brand"]
-    blob    = " ".join(str(row.get(c,"")) for c in
-              ["Name_Type2","Description2","Decoded Value2","UUID Member Name AD16"]).lower()
-    if brand == "Apple":
-        if prod in [0x12,0x18,0x1C,0x23,0x2E]: return "Watch"
-        if prod in [0x19,0x26,0x27,0x37]:      return "Earbuds"
-        if prod in [0x33,0x34]:                return "iPad"
+    # 2) heurísticas por RSSI / intervalo
+    if rssi < -90 and interval < 400:
+        return "Tag/Sensor"
+
+    # 3) fallback pelo OUI
+    prefix = row.get("mac", "")[:8].upper()  # AA:BB:CC
+    brand = OUI_MAP.get(prefix.replace(":", ""), "")
+    if brand in {"Apple", "Samsung", "Xiaomi", "Huawei"}:
         return "Smartphone"
-    if brand == "Samsung":
-        if "watch" in blob: return "Watch"
-        if "buds"  in blob: return "Earbuds"
-        return "Smartphone"
-    if brand in ["Huawei","Xiaomi","OPPO","Realme","OnePlus","Google","LG","Sony"]:
-        return "Smartphone"
-    if row.get("rssi", -60) < -80: return "Earbuds/Tag"
-    return "Unknown"
 
-# ── 3 · Enriquecimento ────────────────────────────────────────────────────
-df["brand"]       = df.apply(classify_brand, axis=1)
-df["device_type"] = df.apply(classify_type, axis=1)
-df["fingerprint"] = df[["mac","brand","device_type"]].astype(str).agg("-".join, axis=1)
+    return "Desconhecido"
 
-# ── 4 · Visão geral ───────────────────────────────────────────────────────
-unique = df.drop_duplicates("fingerprint")
 
-st.subheader("Resumo")
-c1, c2 = st.columns(2)
-c1.metric("Dispositivos únicos", len(unique))
-c2.metric("Marcas identificadas", unique["brand"].nunique())
+def brand_from_mac(mac: str) -> str:
+    prefix = mac.upper().replace(":", "")[:6]
+    return OUI_MAP.get(prefix, "Unknown")
 
-type_counts  = unique["device_type"].value_counts()
-brand_counts = unique["brand"].value_counts().head(15)
 
-fig1, ax1 = plt.subplots(figsize=(6,3))
-type_counts.plot(kind="bar", ax=ax1)
-ax1.set_ylabel("Quantidade")
-ax1.set_title("Distribuição por tipo")
-st.pyplot(fig1)
+# ---------- MAC‑rotation ----------
 
-fig2, ax2 = plt.subplots(figsize=(8,3))
-brand_counts.plot(kind="bar", ax=ax2)
-ax2.set_ylabel("Quantidade")
-ax2.set_title("Top 15 marcas")
-plt.setp(ax2.get_xticklabels(), rotation=45, ha="right")
-st.pyplot(fig2)
+def derive_device_id(row: pd.Series) -> str:
+    """Gera hash estável para agrupar MACs que rotacionam.
+    Usa manufacturer data, local name e prefixo OUI.
+    """
+    base = (
+        row.get("manufacturer_str", "")
+        + "|"
+        + row.get("local_name", "")
+        + "|"
+        + row.get("mac", "")[:8]  # mesmo OUI
+    )
+    return hashlib.sha1(base.encode()).hexdigest()[:12]
 
-# ── 5 · Rotações de MAC ───────────────────────────────────────────────────
-st.subheader("Rotações de MAC (mesmo dispositivo, MACs diferentes)")
-window_m = st.slider("Janela de agrupamento (min)", 1, 30, 15)
-rssi_tol = st.slider("RSSI ± dB", 1, 20, 5)
 
-rots = []
-grp_cols = ["brand","device_type"]
-for _, g in df.groupby(grp_cols):
-    g = g.sort_values("timestamp") if "timestamp" in g.columns else g
-    base, bucket = None, []
-    for _, r in g.iterrows():
-        if base is None:
-            base, bucket = r, [r["mac"]]; continue
-        t_ok = True
-        if "timestamp" in g.columns:
-            t_ok = abs((r["timestamp"]-base["timestamp"]).total_seconds()) <= window_m*60
-        r_ok = abs(float(r.get("rssi",-99))-float(base.get("rssi",-99))) <= rssi_tol
-        if t_ok and r_ok:
-            bucket.append(r["mac"])
-        else:
-            if len(set(bucket))>1:
-                rots.append({"brand":base["brand"],"type":base["device_type"],
-                             "macs":" → ".join(bucket),"trocas":len(set(bucket))-1})
-            base, bucket = r,[r["mac"]]
-    if len(set(bucket))>1:
-        rots.append({"brand":base["brand"],"type":base["device_type"],
-                     "macs":" → ".join(bucket),"trocas":len(set(bucket))-1})
+def analyse_dataframe(df_raw: pd.DataFrame) -> pd.DataFrame:
+    df = df_raw.copy()
+    df["mac"] = df["mac"].str.upper()
+    df["brand"] = df["mac"].apply(brand_from_mac)
+    df["device_type"] = df.apply(classify_device, axis=1)
+    df["device_id"] = df.apply(derive_device_id, axis=1)
+    return df
 
-rot_df = pd.DataFrame(rots).sort_values("trocas",ascending=False)
-st.dataframe(rot_df)
 
-if not rot_df.empty:
-    st.download_button("Baixar CSV", rot_df.to_csv(index=False).encode(),
-                       "mac_rotations.csv", mime="text/csv")
+# ---------- Gráficos ----------
+
+def bar_chart(counts: pd.Series, title: str, xlabel: str):
+    fig, ax = plt.subplots(figsize=(6, 4))
+    counts.plot(kind="bar", ax=ax)
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Quantidade")
+    plt.xticks(rotation=45, ha="right")
+    st.pyplot(fig)
+
+
+# ---------- Interface ----------
+st.title("📊 Análise de Dispositivos Grok — v4")
+
+uploaded = st.file_uploader("Suba a planilha .xlsx ou .csv com os pacotes capturados", type=["xlsx", "csv"])
+
+if uploaded:
+    if uploaded.name.endswith(".xlsx"):
+        raw_df = pd.read_excel(uploaded)
+    else:
+        raw_df = pd.read_csv(uploaded)
+
+    st.success(f"Arquivo carregado: {uploaded.name} — {len(raw_df)} linhas")
+
+    df = analyse_dataframe(raw_df)
+
+    # --- Gráficos: tipo & marca ---
+    col1, col2 = st.columns(2)
+    with col1:
+        bar_chart(df["device_type"].value_counts().sort_values(ascending=False),
+                  "Distribuição por Tipo", "device_type")
+    with col2:
+        bar_chart(df["brand"].value_counts().head(15),
+                  "Top 15 Marcas", "brand")
+
+    # --- Tabela de MAC‑rotation ---
+    st.subheader("📑 Dispositivos que trocaram de MAC")
+    mac_hist = (
+        df.groupby(["device_id", "brand", "device_type"])
+          .agg(mac_list=("mac", lambda x: sorted(set(x))),
+                mac_changes=("mac", lambda x: len(set(x))-1),
+                first_seen=("timestamp", "min"),
+                last_seen=("timestamp", "max"))
+          .reset_index()
+    )
+    mac_hist = mac_hist[mac_hist["mac_changes"] > 0]
+
+    st.dataframe(mac_hist, use_container_width=True)
+
+    # --- Download CSV resultante ---
+    buff = io.BytesIO()
+    mac_hist.to_csv(buff, index=False)
+    st.download_button("📥 Baixar tabela (CSV)", buff.getvalue(),
+                       file_name="mac_changes.csv", mime="text/csv")
+else:
+    st.info("⚠️ Nenhum arquivo enviado ainda.")
