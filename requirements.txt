@@ -1,0 +1,5 @@
+streamlit>=1.44
+pandas>=2.2
+matplotlib>=3.8
+pymanuf==0.3.4
+openpyxl>=3.1
