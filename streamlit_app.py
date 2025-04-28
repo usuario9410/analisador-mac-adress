@@ -1,8 +1,8 @@
 # -------------------------------------------------------------
-# Streamlit app — Análise de Dispositivos BLE/Wi‑Fi (versão 4.3)
+# Streamlit app — Análise de Dispositivos BLE/Wi‑Fi (versão 4.4)
 # -------------------------------------------------------------
 # Requisitos:
-#   streamlit pandas matplotlib openpyxl numpy
+#   streamlit pandas matplotlib openpyxl numpy requests
 # -------------------------------------------------------------
 # Como executar localmente
 #   streamlit run app.py
@@ -11,11 +11,14 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import textwrap
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 
 # ──────────────────────────────────────────────────────────────
@@ -36,7 +39,15 @@ EXPECTED_COLS = {
     "timestamp": ["timestamp", "time", "date"],
     "mac": ["mac", "mac_address", "address"],
     "rssi": ["rssi", "signal", "power"],
-    "device_name": ["name", "device", "device_name"],
+    # ⬇️ permitimos vários nomes para a coluna onde aparece o modelo/fabricante
+    "device_name": [
+        "name",
+        "device",
+        "device_name",
+        "manufacturer",
+        "company",
+        "vendor",
+    ],
 }
 
 DEVICE_TYPES = [
@@ -49,6 +60,7 @@ DEVICE_TYPES = [
     "Desconhecido",
 ]
 
+# Palavras‑chave para inferir marca se OUI falhar
 VENDOR_KEYWORDS = {
     "apple": "Apple",
     "samsung": "Samsung",
@@ -58,27 +70,65 @@ VENDOR_KEYWORDS = {
     "lg": "LG",
     "google": "Google",
     "motorola": "Motorola",
+    "sony": "Sony",
 }
 
+# Pequeno dicionário de fallback caso não tenhamos o CSV nem acesso à internet
+MINIMAL_OUI = {
+    # Apple
+    "DC44D6": "Apple",
+    "F0D1A9": "Apple",
+    "BC92B6": "Apple",
+    # Samsung
+    "CC07AB": "Samsung",
+    "10D1DC": "Samsung",
+    # Xiaomi
+    "C894D2": "Xiaomi",
+    # Huawei
+    "50E59C": "Huawei",
+    # Motorola / Lenovo
+    "00486A": "Motorola",
+    "5CD998": "Lenovo",
+}
+
+OUI_URL = "https://standards-oui.ieee.org/oui/oui.csv"  # ~16 MB; atualizado constantemente
+
 # ──────────────────────────────────────────────────────────────
-# 🔍 OUI (pode ser vazio se não fornecido)
+# 🔍 OUI — carrega local → tenta remoto → fallback minimal
 # ──────────────────────────────────────────────────────────────
 
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
 def _load_oui(path: str | Path | None) -> dict[str, str]:
-    if path is None or not Path(path).exists():
-        return {}
-    oui_df = pd.read_csv(path)
-    oui_df.columns = oui_df.columns.str.lower()
-    mapping: dict[str, str] = {}
-    for _, row in oui_df.iterrows():
-        mapping[row["prefix"].lower().replace(":", "").replace("-", "")] = row[
-            "brand"
-        ]
-    return mapping
+    """Retorna dicionário {prefixo_sem_separador: marca}."""
+    # 1) local
+    if path and Path(path).exists():
+        try:
+            oui_df = pd.read_csv(path)
+            return {
+                row["assignment"].replace("-", "").lower(): row["organization_name"].split(" (")[0]
+                for _, row in oui_df.iterrows()
+            }
+        except Exception as exc:
+            st.warning(f"Falha ao ler oui.csv local: {exc}")
+
+    # 2) remoto
+    try:
+        r = requests.get(OUI_URL, timeout=10)
+        r.raise_for_status()
+        df_remote = pd.read_csv(io.StringIO(r.text))
+        return {
+            row["Assignment"].replace("-", "").lower(): row["Organization Name"].split(" (")[0]
+            for _, row in df_remote.iterrows()
+        }
+    except Exception:
+        # conexão bloqueada em Streamlit Cloud? sem crise, devolve minimal
+        pass
+
+    st.info("Usando mapeamento OUI minimal (offline)")
+    return {k.lower(): v for k, v in MINIMAL_OUI.items()}
 
 
 OUI_LOOKUP: dict[str, str] = _load_oui("oui.csv")
-
 
 # ──────────────────────────────────────────────────────────────
 # 🔧 Helpers
@@ -91,10 +141,11 @@ def _normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
     rename_map: dict[str, str] = {}
     for std, variants in EXPECTED_COLS.items():
         for variant in variants:
-            if variant in df.columns:
-                rename_map[variant] = std
+            if variant.lower() in df.columns:
+                rename_map[variant.lower()] = std
                 break
     df = df.rename(columns=rename_map)
+    # adiciona colunas faltantes
     for col in EXPECTED_COLS:
         if col not in df.columns:
             df[col] = np.nan
@@ -107,7 +158,7 @@ def _lookup_brand(mac: str, dev_name: str) -> str:
     brand = OUI_LOOKUP.get(prefix)
     if brand:
         return brand
-    lower_name = dev_name.lower()
+    lower_name = str(dev_name).lower()
     for kw, vendor in VENDOR_KEYWORDS.items():
         if kw in lower_name:
             return vendor
@@ -115,19 +166,25 @@ def _lookup_brand(mac: str, dev_name: str) -> str:
 
 
 def _infer_type(name: str, brand: str) -> str:
-    n = name.lower()
-    b = brand.lower()
-    if any(k in n for k in ("bud", "pods", "ear", "head")):
+    n = str(name).lower()
+    b = str(brand).lower()
+    # — earphones —
+    if any(k in n for k in ("bud", "pods", "ear", "head", "fone")):
         return "Fones"
-    if any(k in n for k in ("watch", "gear", "fit", "band")):
+    # — watches / bands —
+    if any(k in n for k in ("watch", "gear", "fit", "band", "relog")):
         return "Relógio"
+    # — tablets —
     if any(k in n for k in ("ipad", "tablet")) or "tablet" in b:
         return "Tablet"
-    if any(k in n for k in ("macbook", "pc", "laptop", "notebook")) or "comput" in b:
+    # — computers —
+    if any(k in n for k in ("macbook", "pc", "laptop", "notebook", "desktop")) or "comput" in b:
         return "Computador"
-    if any(k in n for k in ("tag", "tile", "sensor")):
+    # — sensors / tags —
+    if any(k in n for k in ("tag", "tile", "sensor", "beacon")):
         return "Sensor"
-    if any(k in b for k in ("apple", "samsung", "xiaomi", "huawei", "motorola", "google")):
+    # — smartphones (apple / samsung / etc.) —
+    if b in (v.lower() for v in VENDOR_KEYWORDS.values()):
         return "Smartphone"
     return "Desconhecido"
 
@@ -141,7 +198,7 @@ def _stable_id(row):
 # 📂 Upload
 # ──────────────────────────────────────────────────────────────
 
-st.title("📊 Análise de Dispositivos BLE/Wi‑Fi (v4.3)")
+st.title("📊 Análise de Dispositivos BLE/Wi‑Fi (v4.4)")
 
 uploaded = st.file_uploader(
     "Arraste ou selecione uma planilha (XLSX/CSV)",
@@ -153,6 +210,7 @@ if uploaded is None:
     st.info("→ Faça upload de uma planilha para começar.")
     st.stop()
 
+# leitura robusta
 try:
     if uploaded.name.lower().endswith("csv"):
         df_raw = pd.read_csv(uploaded)
@@ -182,7 +240,8 @@ df["mac_clean"] = (
 # Marca e tipo
 
 df["brand"] = df.apply(
-    lambda r: _lookup_brand(str(r["mac_clean"]), str(r.get("device_name", ""))), axis=1
+    lambda r: _lookup_brand(str(r["mac_clean"]), str(r.get("device_name", ""))),
+    axis=1,
 )
 
 df["device_type"] = df.apply(
@@ -194,15 +253,12 @@ df["device_type"] = df.apply(
 # ──────────────────────────────────────────────────────────────
 
 ORANGE = "#FFA500"
-BLUE = "#1f77b4"
 
 col_type, col_brand = st.columns(2)
 
 with col_type:
     st.subheader("Dispositivos por Tipo (v3)")
-    type_counts = (
-        df["device_type"].value_counts().reindex(DEVICE_TYPES, fill_value=0)
-    )
+    type_counts = df["device_type"].value_counts().reindex(DEVICE_TYPES, fill_value=0)
     fig, ax = plt.subplots(figsize=(6, 4))
     type_counts.plot(kind="bar", ax=ax, color=ORANGE, edgecolor="black")
     ax.set_ylabel("Qtd Dispositivos")
