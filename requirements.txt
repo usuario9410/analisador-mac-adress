@@ -1,5 +1,0 @@
-streamlit>=1.32
-pandas>=2.2
-matplotlib>=3.8
-mac-vendor-lookup==1.2.1
-openpyxl   # leitura de XLSX
