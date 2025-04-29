@@ -1,4 +1,0 @@
-streamlit>=1.44
-pandas>=2.2
-matplotlib>=3.8
-pymanuf>=2025.4.1
