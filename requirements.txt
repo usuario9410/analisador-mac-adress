@@ -1,7 +1,0 @@
-# ––– dependências da aplicação –––
-streamlit>=1.44
-pandas>=2.2
-matplotlib>=3.8
-
-# biblioteca de procura de fabricantes - versão atual
-pymanuf==2025.4.1          #  ⟵ importante trocar pelo release novo
