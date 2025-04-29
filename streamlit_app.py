@@ -17,7 +17,7 @@ import streamlit as st
 # ──────────────────────────────────────────────────────────────
 try:
     # uso correto da lib pymanuf
-    from pymanuf import MacParser          # ← era from pymanuf.manuf import manuf
+from pymanuf.manuf import MacParser
     _parser = MacParser()
     def get_vendor(mac: str) -> str:
         return _parser.get_manuf(mac) or "Unknown"
