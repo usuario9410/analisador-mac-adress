@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from pymanuf.manuf import MacParser  # pip install pymanuf
+from pymanuf import MacParser
 import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="Analisador de MAC Address", layout="centered")
