@@ -16,32 +16,29 @@ import streamlit as st
 #  Função de lookup de fabricante (OUI)
 # ──────────────────────────────────────────────────────────────
 try:
-    # método principal – usa pacote pymanuf (precisa estar no requirements)
-    from pymanuf.manuf import manuf
-    _parser = manuf.MacParser()
+    # uso correto da lib pymanuf
+    from pymanuf import MacParser          # ← era from pymanuf.manuf import manuf
+    _parser = MacParser()
     def get_vendor(mac: str) -> str:
-        """Retorna o fabricante (ou 'Unknown') dado o MAC (string)."""
         return _parser.get_manuf(mac) or "Unknown"
 
 except ModuleNotFoundError:
-    # fallback caseiro: lê tabela OUI local (assets/oui.csv)
-    import csv, importlib.resources as pkg
-
+    # …(mantém o fallback, caso retire o pacote no futuro)…
+    from pathlib import Path, PurePosixPath
     OUI = {}
-    path_csv = pkg.files("assets").joinpath("oui.csv")
-    with path_csv.open() as f:
-        for prefix, vendor in csv.reader(f):
-            OUI[prefix.upper()] = vendor.strip()
-
+    path_csv = Path(__file__).parent / "assets" / "oui.csv"
+    if path_csv.exists():
+        import csv
+        with path_csv.open() as f:
+            for prefix, vendor in csv.reader(f):
+                OUI[prefix.upper()] = vendor.strip()
     def get_vendor(mac: str) -> str:
         return OUI.get(mac[:8].upper(), "Unknown")
 
-# inferência extra por palavra-chave no nome
-VENDOR_KEYWORDS = {
-    "esp": "Espressif (ESP-32)",
-    "rasp": "Raspberry Pi",
-}
+# ░░░ 2. NÃO precisa mais de importlib.resources  ░░░
+# remova   import importlib.resources as pkg   se ele ficou no fallback.
 
+# ░░░ 3. requirements.txt já está ok ░░░  (mantém pymanuf==2025.4.1)
 # ──────────────────────────────────────────────────────────────
 #  Configuração da página
 # ──────────────────────────────────────────────────────────────
